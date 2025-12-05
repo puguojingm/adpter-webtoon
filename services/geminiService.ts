@@ -1,26 +1,198 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { 
-  getBreakdownWorkerPrompt, 
-  getBreakdownAlignerPrompt, 
-  getScriptWorkerPrompt, 
-  getWebtoonAlignerPrompt,
-  getAdaptMethod,
-  OUTPUT_STYLE,
-  PLOT_EXAMPLE,
-  PLOT_TEMPLATE,
-  SCRIPT_EXAMPLE,
-  SCRIPT_TEMPLATE 
-} from '../constants';
-import { NovelChapter, PlotPoint, LogEntry } from '../types';
+  getBreakdownyWorkerPrompt, 
+  getBreakdownySysPrompt,
+  getBreakdownAlignerSysPrompt, 
+  getBreakdownBasePrompt
+} from '../prompts/breakPlot';
+import { 
+  getScriptSysPrompt, 
+  getScriptBasePrompt, 
+  getScriptWorkerPrompt,
+  getWebtoonAlignerPrompt 
+} from '../prompts/adaptScript';
+import { NovelChapter, PlotPoint, LogEntry, LLMConfig } from '../types';
 
-const apiKey = process.env.API_KEY || ''; 
-const ai = new GoogleGenAI({ apiKey });
+// --- Generic LLM Implementation ---
 
 const cleanText = (text: string | undefined) => text || "";
-
-// Helper: Delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// OpenAI/Standard Compatible Stream Handler
+async function streamOpenAICompatible(
+  config: LLMConfig,
+  prompt: string,
+  systemInstruction: string,
+  onChunk: (text: string) => void
+): Promise<string> {
+  const baseUrl = config.baseUrl || "https://api.openai.com/v1";
+  const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  
+  const messages = [
+    { role: "system", content: systemInstruction },
+    { role: "user", content: prompt }
+  ];
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${config.apiKey}`
+      },
+      body: JSON.stringify({
+        model: config.modelName,
+        messages: messages,
+        stream: true,
+        temperature: 0.7
+      })
+    });
+
+    if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenAI API Error (${response.status}): ${errText}`);
+    }
+
+    if (!response.body) throw new Error("No response body");
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let fullText = "";
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      
+      const lines = buffer.split("\n");
+      // Keep the last line in buffer if it's incomplete
+      buffer = lines.pop() || ""; 
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("data: ")) {
+          const dataStr = trimmed.slice(6);
+          if (dataStr === "[DONE]") continue;
+          try {
+            const data = JSON.parse(dataStr);
+            const content = data.choices?.[0]?.delta?.content || "";
+            if (content) {
+              fullText += content;
+              onChunk(content);
+            }
+          } catch (e) {
+            console.warn("Failed to parse SSE line", line);
+          }
+        }
+      }
+    }
+    return fullText;
+
+  } catch (error: any) {
+    throw error;
+  }
+}
+
+// Gemini Stream Handler
+async function streamGemini(
+  config: LLMConfig,
+  prompt: string,
+  systemInstruction: string,
+  onChunk: (text: string) => void
+): Promise<string> {
+  const options: any = { apiKey: config.apiKey };
+  if (config.baseUrl) {
+    options.baseUrl = config.baseUrl;
+  }
+  const ai = new GoogleGenAI(options);
+  
+  // Handle model name mapping if needed, or trust user input
+  // Default to gemini-2.5-flash if generic name given, but usually use config.modelName
+  const modelName = config.modelName || 'gemini-2.5-flash';
+
+  const responseStream = await ai.models.generateContentStream({
+    model: modelName,
+    contents: prompt,
+    config: {
+      systemInstruction: systemInstruction
+    }
+  });
+
+  let fullText = "";
+  for await (const chunk of responseStream) {
+    const text = chunk.text || "";
+    if (text) {
+      fullText += text;
+      onChunk(text);
+    }
+  }
+  return fullText;
+}
+
+// Unified Streaming Function
+async function generateStreamWithRetry(
+  config: LLMConfig,
+  prompt: string,
+  systemInstruction: string,
+  agentName: string,
+  onUpdate?: (msg: string) => void,
+  onChunk?: (text: string) => void,
+  checkStop?: () => boolean
+): Promise<string> {
+  let attempt = 0;
+  const MAX_API_RETRIES = 3;
+
+  while (true) {
+    if (checkStop && checkStop()) throw new Error("USER_ABORT");
+
+    try {
+      // Dispatch based on provider
+      if (config.provider === 'gemini') {
+        return await streamGemini(config, prompt, systemInstruction, onChunk || (() => {}));
+      } else {
+        return await streamOpenAICompatible(config, prompt, systemInstruction, onChunk || (() => {}));
+      }
+    } catch (e: any) {
+      if (checkStop && checkStop()) throw new Error("USER_ABORT");
+      
+      const errMsg = e.toString().toLowerCase();
+
+      // Retry Logic
+      if (errMsg.includes('429') || errMsg.includes('quota') || errMsg.includes('rate limit')) {
+         onUpdate?.(`⚠️ ${config.provider} Rate Limit. Pausing 60s...`);
+         if (onChunk) onChunk(`\n[System] Rate Limit encountered. Pausing 60s...\n`);
+         
+         for (let i = 0; i < 60; i++) {
+             if (checkStop && checkStop()) throw new Error("USER_ABORT");
+             await delay(1000);
+         }
+         onUpdate?.(`${agentName}: Resuming...`);
+         continue; 
+      }
+
+      // Fatal Auth Errors
+      if (errMsg.includes('401') || errMsg.includes('403') || errMsg.includes('invalid api key')) {
+         throw new Error(`FATAL AUTH ERROR (${config.provider}): ${e.message}`);
+      }
+
+      // Server Errors
+      if (attempt < MAX_API_RETRIES) {
+         attempt++;
+         const waitTime = attempt * 3000;
+         onUpdate?.(`⚠️ Error (${e.message}). Retrying in ${waitTime/1000}s...`);
+         if (onChunk) onChunk(`\n[System] API Error: ${e.message}. Retrying...\n`);
+         await delay(waitTime);
+         continue;
+      }
+
+      throw e;
+    }
+  }
+}
 
 interface AgentLoopResult {
   content: string;
@@ -30,85 +202,9 @@ interface AgentLoopResult {
   isApiError?: boolean;
 }
 
-// Helper: Robust API Call with Retry Strategies
-async function generateContentWithRetry(
-  model: string,
-  prompt: string,
-  systemInstruction: string,
-  agentName: string,
-  onUpdate?: (msg: string) => void,
-  checkStop?: () => boolean
-): Promise<string> {
-  let attempt = 0;
-  const MAX_API_RETRIES = 3; // For transient errors (5xx)
-  
-  while (true) {
-    // 1. Check Cancellation before request
-    if (checkStop && checkStop()) {
-        throw new Error("USER_ABORT");
-    }
-
-    try {
-      const result = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: { systemInstruction: systemInstruction }
-      });
-      return cleanText(result.text);
-    } catch (e: any) {
-      // 2. Check Cancellation after error
-      if (checkStop && checkStop()) {
-          throw new Error("USER_ABORT");
-      }
-
-      const errMsg = e.toString().toLowerCase();
-
-      // Strategy 1: Rate Limit (429) -> Wait 60s and Retry
-      if (errMsg.includes('429') || errMsg.includes('resource exhausted') || errMsg.includes('too many requests')) {
-         onUpdate?.(`⚠️ API Rate Limit Triggered. Pausing for 60s before retry...`);
-         
-         // Wait with intermediate checks
-         for (let i = 0; i < 60; i++) {
-             if (checkStop && checkStop()) throw new Error("USER_ABORT");
-             await delay(1000);
-         }
-         
-         onUpdate?.(`${agentName}: Resuming after cooldown...`);
-         continue; 
-      }
-
-      // Strategy 2: Quota/Auth/Permission (403, 401, 400) -> Fatal Stop
-      if (errMsg.includes('403') || errMsg.includes('quota') || errMsg.includes('permission') || errMsg.includes('key')) {
-         throw new Error(`FATAL_API_ERROR: Quota exceeded or Permission denied. ${e.message}`);
-      }
-
-      // Strategy 3: Server Errors (500, 503) -> Short Wait and Retry
-      if (errMsg.includes('500') || errMsg.includes('503') || errMsg.includes('internal') || errMsg.includes('overloaded')) {
-         if (attempt < MAX_API_RETRIES) {
-             attempt++;
-             const waitTime = attempt * 5000;
-             onUpdate?.(`⚠️ Server Busy (${e.message}). Retrying in ${waitTime/1000}s...`);
-             await delay(waitTime);
-             continue;
-         }
-      }
-
-      // Strategy 4: Unknown/Network Errors -> Retry a few times
-      if (attempt < MAX_API_RETRIES) {
-          attempt++;
-          onUpdate?.(`⚠️ Network/Unknown Error. Retrying (${attempt}/${MAX_API_RETRIES})...`);
-          await delay(2000);
-          continue;
-      }
-
-      // If exhausted retries or fatal error
-      throw e;
-    }
-  }
-}
-
 // Helper: Agent Execution Loop
 async function agentLoop(
+  config: LLMConfig,
   workerName: string,
   alignerName: string,
   workerSystemPrompt: string,
@@ -117,6 +213,7 @@ async function agentLoop(
   alignerContextPrompt: (output: string) => string,
   maxRetries = 3,
   onProgress?: (status: string) => void,
+  onStreamChunk?: (text: string) => void, // Callback for streaming text
   checkStop?: () => boolean
 ): Promise<AgentLoopResult> {
   
@@ -126,16 +223,18 @@ async function agentLoop(
   const logs: LogEntry[] = [];
 
   while (retries < maxRetries) {
-    if (checkStop && checkStop()) {
-        throw new Error("USER_ABORT");
-    }
+    const currentAttempt = retries + 1;
+    if (checkStop && checkStop()) throw new Error("USER_ABORT");
 
     // 1. Worker Step
-    onProgress?.(retries === 0 ? `${workerName}: Generating content...` : `${workerName}: Refining content (Attempt ${retries + 1})...`);
+    onProgress?.(retries === 0 ? `${workerName}: Generating...` : `${workerName}: Refining (Attempt ${currentAttempt})...`);
     
+    // Add header to stream
+    onStreamChunk?.(`\n\n══════════════════════════════════════\n[Attempt ${currentAttempt}/${maxRetries}] ${workerName} Working...\n══════════════════════════════════════\n\n`);
+
     let fullWorkerPrompt = workerTaskPrompt;
     if (feedback) {
-      fullWorkerPrompt += `\n\n[Previous Feedback - Please Fix]\n${feedback}`;
+      fullWorkerPrompt += `\n\n[Previous Output]\n${currentOutput}\n\n[Previous Feedback - Please Fix]\n${feedback}`;
     }
 
     logs.push({
@@ -143,17 +242,19 @@ async function agentLoop(
         role: 'user',
         agentName: workerName,
         content: fullWorkerPrompt,
-        sysPrompt: workerSystemPrompt
+        sysPrompt: workerSystemPrompt,
+        attempt: currentAttempt
     });
 
     try {
-      // Use Robust API Wrapper
-      currentOutput = await generateContentWithRetry(
-        'gemini-3-pro-preview', 
+      // STREAMING CALL FOR WORKER
+      currentOutput = await generateStreamWithRetry(
+        config, 
         fullWorkerPrompt, 
         workerSystemPrompt, 
         workerName,
         onProgress,
+        onStreamChunk, // Pass streaming callback here
         checkStop
       );
       
@@ -163,53 +264,44 @@ async function agentLoop(
           agentName: workerName,
           content: currentOutput,
           sysPrompt:"",
+          attempt: currentAttempt
       });
 
     } catch (e: any) {
       if (e.message === 'USER_ABORT') throw e;
-
       const errorMsg = `API ERROR in Worker: ${e.message || e}`;
-      
-      logs.push({
-          timestamp: Date.now(),
-          role: 'system',
-          agentName: 'System',
-          content: errorMsg
-      });
-      
-      return { 
-        content: currentOutput, 
-        status: 'FAIL', 
-        report: errorMsg, 
-        logs, 
-        isApiError: true 
-      };
+      onStreamChunk?.(`\n\n❌ ${errorMsg}\n`);
+      logs.push({ timestamp: Date.now(), role: 'system', agentName: 'System', content: errorMsg, attempt: currentAttempt });
+      return { content: currentOutput, status: 'FAIL', report: errorMsg, logs, isApiError: true };
     }
 
-    if (checkStop && checkStop()) {
-        throw new Error("USER_ABORT");
-    }
+    if (checkStop && checkStop()) throw new Error("USER_ABORT");
 
-    // 2. Aligner Step
+    // 2. Aligner Step 
     onProgress?.(`${alignerName}: Checking quality...`);
     const alignerPrompt = alignerContextPrompt(currentOutput);
     
+    // Add header to stream
+    onStreamChunk?.(`\n\n--------------------------------------\n>>> [Aligner Check] ${alignerName} Verifying...\n--------------------------------------\n\n`);
+
     logs.push({  
         timestamp: Date.now(),
         role: 'user',
         agentName: alignerName,
         content: alignerPrompt,
-        sysPrompt: alignerSystemPrompt
+        sysPrompt: alignerSystemPrompt,
+        attempt: currentAttempt
     });
 
     try {
-      // Use Robust API Wrapper
-      const report = await generateContentWithRetry(
-        'gemini-3-pro-preview',
+      // STREAMING CALL FOR ALIGNER (Now Enabled)
+      const report = await generateStreamWithRetry(
+        config,
         alignerPrompt,
         alignerSystemPrompt,
         alignerName,
         onProgress,
+        onStreamChunk, // Stream aligner output to console too
         checkStop
       );
 
@@ -217,44 +309,30 @@ async function agentLoop(
           timestamp: Date.now(),
           role: 'model',
           agentName: alignerName,
-          content: report
+          content: report,
+          attempt: currentAttempt
       });
 
       if (report.includes("PASS")) {
+        onStreamChunk?.(`\n\n✅ CHECK PASSED\n`);
         return { content: currentOutput, status: 'PASS', report, logs };
       } else {
+        onStreamChunk?.(`\n\n⚠️ CHECK FAILED. Preparing retry...\n`);
         feedback = report;
         retries++;
       }
     } catch (e: any) {
        if (e.message === 'USER_ABORT') throw e;
-
        const errorMsg = `API ERROR in Aligner: ${e.message || e}`;
-
-       logs.push({
-          timestamp: Date.now(),
-          role: 'system',
-          agentName: 'System',
-          content: errorMsg
-       });
-       
-       return { 
-         content: currentOutput, 
-         status: 'FAIL', 
-         report: errorMsg, 
-         logs,
-         isApiError: true
-       };
+       onStreamChunk?.(`\n\n❌ ${errorMsg}\n`);
+       logs.push({ timestamp: Date.now(), role: 'system', agentName: 'System', content: errorMsg, attempt: currentAttempt });
+       return { content: currentOutput, status: 'FAIL', report: errorMsg, logs, isApiError: true };
     }
   }
 
-  logs.push({
-      timestamp: Date.now(),
-      role: 'system',
-      agentName: 'System',
-      content: "Max retries reached."
-  });
-
+  const failMsg = "Max retries reached.";
+  onStreamChunk?.(`\n\n❌ ${failMsg}\n`);
+  logs.push({ timestamp: Date.now(), role: 'system', agentName: 'System', content: failMsg, attempt: maxRetries });
   return { content: currentOutput, status: 'FAIL', report: "Max retries reached. Last feedback: " + feedback, logs };
 }
 
@@ -262,191 +340,163 @@ async function agentLoop(
  * Breakdown Agent Loop
  */
 export const generateBreakdownBatch = async (
+  config: LLMConfig,
   chapters: NovelChapter[],
   novelType: string,
   lastEpisode: number,
   lastPlotNumber: number,
   maxRetries: number,
   onUpdate: (msg: string) => void,
+  onStream: (text: string) => void,
   novelDescription: string = "",
   batchSize: number = 6,
   nextBatchStartEpisode?: number,
   checkStop?: () => boolean
 ) => {
   const chapterText = chapters.map(c => `Chapter ${c.name}:\n${c.content}`).join("\n\n");
-  const adaptMethod = getAdaptMethod(batchSize);
   
-  // Includes both Method and Style as requested
-  const workerTask = `
-  NOVEL TYPE: ${novelType}
-  
-  TASK: Breakdown the following ${batchSize} chapters into plot points.
-  
-  CONTEXT: 
-  - The previous batch ended at Episode ${lastEpisode}.
-  - The previous batch ended at Plot Number ${lastPlotNumber}.
-  
-  INSTRUCTION: 
-  - You can continue with Episode ${lastEpisode} if the plot connects directly to the previous cliffhanger, OR start with Episode ${lastEpisode + 1} if it's a new scene.
-  - DO NOT SKIP EPISODE NUMBERS.
-  - Start plot numbering from 【剧情${lastPlotNumber + 1}】.
-  
-  KNOWLEDGE (Method & Style):
-  ${adaptMethod}
-  
-  TEMPLATE:
-  ${PLOT_TEMPLATE}
-  
-  EXAMPLE:
-  ${PLOT_EXAMPLE}
-
-  NOVEL CONTENT:
-  ${chapterText} 
-  `;
+  const workerTask = getBreakdownyWorkerPrompt(
+    novelType as any, 
+    novelDescription, 
+    chapterText, 
+    batchSize, 
+    lastEpisode, 
+    lastPlotNumber, 
+    undefined, 
+    nextBatchStartEpisode
+  );
 
   const alignerPromptBuilder = (output: string) => `
   TASK: Check the quality of this plot breakdown.
-  
-  NOVEL TYPE: ${novelType}
-  
-  
-  CONTEXT: 
-  - The previous batch ended at Episode ${lastEpisode}.
-  - The previous batch ended at Plot Number ${lastPlotNumber}.
-  
-  INSTRUCTION: 
-  - You can continue with Episode ${lastEpisode} if the plot connects directly to the previous cliffhanger, OR start with Episode ${lastEpisode + 1} if it's a new scene.
-  - DO NOT SKIP EPISODE NUMBERS.
-  - Start plot numbering from 【剧情${lastPlotNumber + 1}】.
-  
-  KNOWLEDGE (Method & Style):
-  ${adaptMethod}
-  
-  TEMPLATE:
-  ${PLOT_TEMPLATE}
-  
-  EXAMPLE:
-  ${PLOT_EXAMPLE}
-
-  ORIGINAL NOVEL:
-  ${chapterText}
-  
-  GENERATED BREAKDOWN:
-  ${output}
+  ${getBreakdownBasePrompt(novelType as any, 
+    novelDescription, 
+    chapterText, 
+    batchSize, 
+    lastEpisode, 
+    lastPlotNumber, 
+    undefined, 
+    nextBatchStartEpisode)}
+[GENERATED BREAKDOWN]:
+${output}
   `;
 
   return agentLoop(
+    config,
     'Breakdown Worker',
     'Breakdown Aligner',
-    getBreakdownWorkerPrompt(novelType, novelDescription, batchSize, lastPlotNumber, nextBatchStartEpisode),
-    getBreakdownAlignerPrompt(novelType, novelDescription, batchSize),
+    getBreakdownySysPrompt(batchSize),
+    getBreakdownAlignerSysPrompt(novelType, novelDescription, batchSize),
     workerTask,
     alignerPromptBuilder,
     maxRetries,
     onUpdate,
+    onStream,
     checkStop
   );
 };
 
-/**
- * Script Agent Loop
- */
-export const generateScriptEpisode = async (
-  episodeNum: number,
+// --- Script Service (Batch) ---
+
+export const generateBatchScripts = async (
+  config: LLMConfig,
   plotPoints: PlotPoint[],
-  relatedChapters: string, // content of relevant chapters
+  relatedChapters: string,
+  previousScript: string,
+  previousBatchPlotPoint: string,
   maxRetries: number,
   onUpdate: (msg: string) => void,
+  onStream: (text: string) => void,
   novelType: string = "",
   novelDescription: string = "",
   batchSize: number = 6,
   checkStop?: () => boolean
 ) => {
   const plotText = plotPoints.map(p => p.content).join("\n");
-  const adaptMethod = getAdaptMethod(batchSize);
   
-  const workerTask = `
-  TASK: Write Script for Episode ${episodeNum}.
-  
-  PLOT POINTS:
-  ${plotText}
-  
-  SOURCE NOVEL CONTENT:
-  ${relatedChapters}
-  
-  KNOWLEDGE (Method & Style):
-  ${adaptMethod}
-  ${OUTPUT_STYLE}
-  
-  TEMPLATE:
-  ${SCRIPT_TEMPLATE}
-
-  EXAMPLE:
-  ${SCRIPT_EXAMPLE}
-  `;
+  const workerTask = getScriptWorkerPrompt(
+    novelType,
+    novelDescription,
+    relatedChapters,
+    plotText,
+    batchSize,
+    previousScript,
+    previousBatchPlotPoint
+  );
 
   const alignerPromptBuilder = (output: string) => `
-  TASK: Check consistency of this script.
-  
-  PLOT POINTS:
-  ${plotText}
+  TASK: Check consistency of these scripts.
 
-  SOURCE NOVEL CONTENT:
-  ${relatedChapters}
-  
-  KNOWLEDGE (Method & Style):
-  ${adaptMethod}
-  ${OUTPUT_STYLE}
-  
-  TEMPLATE:
-  ${SCRIPT_TEMPLATE}
+  ${getScriptBasePrompt(
+    novelType,
+    novelDescription,
+    relatedChapters,
+    plotText,
+    batchSize,
+    previousScript,
+    previousBatchPlotPoint
+  )}
 
-  EXAMPLE:
-  ${SCRIPT_EXAMPLE}
-  
-  GENERATED SCRIPT:
-  ${output}
+[GENERATED SCRIPT]:
+${output}
   `;
 
   return agentLoop(
+    config,
     'Script Worker',
     'Webtoon Aligner',
-    getScriptWorkerPrompt(novelType, novelDescription),
+    getScriptSysPrompt(novelType, novelDescription),
     getWebtoonAlignerPrompt(novelType, novelDescription),
     workerTask,
     alignerPromptBuilder,
     maxRetries,
     onUpdate,
+    onStream,
     checkStop
   );
 };
 
-// Parser Helpers
+// ... existing helper functions (parseScripts, parsePlotPoints) keep unchanged ...
+// Helper to parse multiple episodes from the output string (separated by ===)
+export const parseScripts = (text: string): { episode: number, content: string }[] => {
+  const scripts: { episode: number, content: string }[] = [];
+  const parts = text.split('===');
+  
+  parts.forEach(part => {
+    const trimmed = part.trim();
+    if (!trimmed) return;
+    
+    // Extract episode number from "# 第<N>集"
+    const match = trimmed.match(/#\s*第\s*(\d+)\s*集/);
+    if (match) {
+      scripts.push({
+        episode: parseInt(match[1]),
+        content: trimmed
+      });
+    }
+  });
+  
+  return scripts;
+};
+
+// Reuse parsePlotPoints
 export const parsePlotPoints = (text: string, batchIdx: number, startPlotNum: number = 0): PlotPoint[] => {
   const lines = text.split('\n');
   const points: PlotPoint[] = [];
-  // Updated regex to better capture Scene, Action, and HookType
-  // Matches: 【剧情1】[场景]，[内容]，[钩子]，第1集...
-  // Flexible to handle standard comma or Chinese comma
-  const regex = /【(剧情\d+)】\s*(.*?)[,，]\s*(.*?)[,，]\s*(.*?)[,，]\s*第(\d+)集/;
+  const regex = /【(剧情\d+)】\s*(.*?)[,，]\s*(.*?)[,，]\s*(.*?)[,，]\s*第(\d+)集(?:.*?第(\d+)章)?/;
 
   let localIndex = 0;
   lines.forEach(line => {
     const match = line.match(regex);
     if (match) {
       localIndex++;
-      // Create a GLOBALLY unique internal ID by prefixing with batch index OR using global counter logic
-      // Ideally, the 'id' field is used for React keys and status tracking.
-      // We use a composite ID to guarantee uniqueness regardless of what the LLM outputs.
-      const uniqueInternalId = `batch-${batchIdx}-plot-${startPlotNum + localIndex}`;
-      
       points.push({
-        id: uniqueInternalId, // Internal Unique ID
+        id: `batch-${batchIdx}-plot-${startPlotNum + localIndex}`,
         content: line,
         scene: match[2].trim(), 
-        action: match[3].trim(), // Extracted Action
-        hookType: match[4].trim(), // Extracted Hook Type
+        action: match[3].trim(), 
+        hookType: match[4].trim(), 
         episode: parseInt(match[5]),
+        sourceChapter: match[6] ? `第${match[6]}章` : '',
         status: 'unused',
         batchIndex: batchIdx
       });

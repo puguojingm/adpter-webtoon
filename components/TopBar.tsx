@@ -1,14 +1,16 @@
+
 import React from 'react';
 import { UserInfo } from '../types';
-import { Bell, Search, User as UserIcon, LogOut } from 'lucide-react';
+import { Bell, Search, User as UserIcon, LogOut, Settings } from 'lucide-react';
 
 interface TopBarProps {
   user: UserInfo;
   onLogout: () => void;
   title?: string;
+  onOpenModelManager: () => void;
 }
 
-export const TopBar: React.FC<TopBarProps> = ({ user, onLogout, title }) => {
+export const TopBar: React.FC<TopBarProps> = ({ user, onLogout, title, onOpenModelManager }) => {
   return (
     <div className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-6 sticky top-0 z-20">
       {/* Left Area (Title or Breadcrumbs) */}
@@ -26,6 +28,15 @@ export const TopBar: React.FC<TopBarProps> = ({ user, onLogout, title }) => {
              className="pl-9 pr-4 py-1.5 bg-gray-50 border border-gray-200 rounded-full text-sm text-gray-600 focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 w-48 transition-all"
            />
         </div>
+
+        <button 
+            onClick={onOpenModelManager}
+            className="flex items-center gap-1 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-full hover:bg-gray-200 hover:text-gray-800 transition-colors text-xs font-bold"
+            title="全局模型管理"
+        >
+            <Settings className="w-3.5 h-3.5" />
+            <span>模型配置</span>
+        </button>
 
         <button className="relative text-gray-400 hover:text-gray-600 transition-colors">
           <Bell className="w-5 h-5" />
@@ -49,6 +60,12 @@ export const TopBar: React.FC<TopBarProps> = ({ user, onLogout, title }) => {
                <p className="text-xs text-gray-500">登录账号</p>
                <p className="text-sm font-medium text-gray-800 truncate">{user.email}</p>
              </div>
+             <button 
+               onClick={onOpenModelManager}
+               className="w-full text-left px-4 py-2 text-sm text-gray-600 hover:bg-gray-50 flex items-center"
+             >
+               <Settings className="w-4 h-4 mr-2" /> 模型设置
+             </button>
              <button 
                onClick={onLogout}
                className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center"

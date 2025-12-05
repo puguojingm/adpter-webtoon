@@ -1,12 +1,14 @@
+
 import React, { useState } from 'react';
-import { UploadCloud, Loader2 } from 'lucide-react';
+import { UploadCloud, Loader2, FilePlus } from 'lucide-react';
 
 interface FileUploaderProps {
   onUpload: (files: { content: string; fileName: string }[]) => void;
   onNotification: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void;
+  compact?: boolean;
 }
 
-export const FileUploader: React.FC<FileUploaderProps> = ({ onUpload, onNotification }) => {
+export const FileUploader: React.FC<FileUploaderProps> = ({ onUpload, onNotification, compact = false }) => {
   const [isReading, setIsReading] = useState(false);
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -38,6 +40,27 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onUpload, onNotifica
       event.target.value = '';
     }
   };
+
+  if (compact) {
+    return (
+      <label className={`flex items-center justify-center gap-2 px-4 py-2 bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:text-primary-600 hover:border-primary-200 transition-all cursor-pointer shadow-sm text-sm font-medium ${isReading ? 'opacity-50 cursor-not-allowed' : ''}`}>
+        {isReading ? (
+          <Loader2 className="w-4 h-4 animate-spin text-primary-500" />
+        ) : (
+          <FilePlus className="w-4 h-4" />
+        )}
+        <span>{isReading ? '读取中...' : '导入章节 (.txt)'}</span>
+        <input 
+          type="file" 
+          className="hidden" 
+          accept=".txt" 
+          multiple 
+          onChange={handleFileChange} 
+          disabled={isReading}
+        />
+      </label>
+    );
+  }
 
   return (
     <div className="w-full">

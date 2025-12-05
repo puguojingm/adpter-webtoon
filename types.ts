@@ -1,5 +1,4 @@
 
-
 export enum AgentType {
   MAIN = 'Master Agent',
   BREAKDOWN_WORKER = 'Breakdown Worker',
@@ -21,6 +20,23 @@ export enum NovelType {
   REBIRTH = '重生'
 }
 
+// --- LLM Configuration Types ---
+export type LLMProvider = 'gemini' | 'openai' | 'anthropic';
+
+export interface LLMConfig {
+  provider: LLMProvider;
+  apiKey: string;
+  baseUrl?: string; // Optional for OpenAI/Anthropic proxies
+  modelName: string;
+}
+
+export interface SavedModel {
+  id: string;
+  name: string; // User defined name (e.g., "My Paid GPT-4")
+  config: LLMConfig;
+  isDefault?: boolean;
+}
+
 export interface NovelChapter {
   id: string;
   name: string;
@@ -38,6 +54,7 @@ export interface PlotPoint {
   episode: number;
   status: 'unused' | 'used';
   batchIndex: number; // Which batch this belongs to
+  sourceChapter?: string;
 }
 
 export interface PlotBatch {
@@ -73,6 +90,7 @@ export interface LogEntry {
   agentName: string;
   content: string;
   sysPrompt?: string;
+  attempt?: number; // Track which loop iteration this entry belongs to
 }
 
 export interface ExecutionLog {
@@ -84,6 +102,7 @@ export interface ExecutionLog {
   entries: LogEntry[];
   result?: string;
   report?: string;
+  isApiError?: boolean;
 }
 
 export interface ProjectState {
@@ -94,6 +113,10 @@ export interface ProjectState {
   batchSize?: number; // Configurable batch size
   maxRetries?: number; // Configurable max retries
   
+  // Model References (IDs pointing to global SavedModel)
+  breakdownModelId: string;
+  scriptModelId: string;
+
   // Data
   chapters: NovelChapter[];
   plotBatches: PlotBatch[];

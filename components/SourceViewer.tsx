@@ -1,19 +1,23 @@
+
 import React, { useState } from 'react';
 import { NovelChapter } from '../types';
 import { FileText, CheckCircle2 } from 'lucide-react';
+import { FileUploader } from './FileUploader';
 
 interface SourceViewerProps {
   chapters: NovelChapter[];
+  onUpload: (files: { content: string; fileName: string }[]) => void;
+  onNotification: (type: 'success' | 'error' | 'info' | 'warning', message: string) => void;
 }
 
-export const SourceViewer: React.FC<SourceViewerProps> = ({ chapters }) => {
+export const SourceViewer: React.FC<SourceViewerProps> = ({ chapters, onUpload, onNotification }) => {
   const [selectedId, setSelectedId] = useState<string | null>(chapters.length > 0 ? chapters[0].id : null);
 
   const selectedChapter = chapters.find(c => c.id === selectedId);
 
   return (
     <div className="flex h-full bg-white border-t border-gray-200">
-      {/* Chapter List */}
+      {/* Chapter List Sidebar */}
       <div className="w-72 border-r border-gray-200 bg-gray-50 flex flex-col flex-shrink-0">
         <div className="p-4 border-b border-gray-200 font-bold text-gray-700 bg-gray-100 flex justify-between items-center">
           <span>章节列表 ({chapters.length})</span>
@@ -21,6 +25,8 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({ chapters }) => {
              {chapters.filter(c => c.isProcessed).length} 已拆解
           </span>
         </div>
+        
+        {/* Scrollable List */}
         <div className="flex-1 overflow-y-auto">
           {chapters.map(chapter => (
             <button
@@ -43,14 +49,19 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({ chapters }) => {
           ))}
           {chapters.length === 0 && (
             <div className="p-8 text-center text-gray-400 text-xs">
-              暂无章节，请点击右上角上传
+              暂无章节，请导入
             </div>
           )}
+        </div>
+
+        {/* Uploader Footer in Sidebar */}
+        <div className="p-3 border-t border-gray-200 bg-white">
+           <FileUploader onUpload={onUpload} onNotification={onNotification} compact={true} />
         </div>
       </div>
 
       {/* Content Viewer */}
-      <div className="flex-1 flex flex-col h-full overflow-hidden">
+      <div className="flex-1 flex flex-col h-full overflow-hidden bg-white">
         {selectedChapter ? (
           <>
             <div className="p-4 border-b border-gray-200 bg-white shadow-sm z-10 flex justify-between items-center">
@@ -68,8 +79,11 @@ export const SourceViewer: React.FC<SourceViewerProps> = ({ chapters }) => {
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-400">
-            请选择章节查看内容
+          <div className="flex-1 flex items-center justify-center text-gray-400 bg-gray-50">
+             <div className="text-center">
+                <p>请选择左侧章节查看内容</p>
+                <p className="text-sm mt-2">或点击下方按钮导入新章节</p>
+             </div>
           </div>
         )}
       </div>

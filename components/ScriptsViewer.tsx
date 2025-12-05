@@ -57,9 +57,10 @@ export const ScriptsViewer: React.FC<ScriptsViewerProps> = ({
                <button 
                  onClick={onGenerateNext}
                  className="w-full flex items-center justify-center px-4 h-10 bg-primary-600 text-white rounded-lg hover:bg-primary-700 text-sm font-bold transition-all shadow-md hover:shadow-lg"
+                 title="生成当前批次的所有剧本"
                >
                  <Plus className="w-4 h-4 mr-2" />
-                 生成下一集
+                 生成剧本
                </button>
 
                {/* Secondary Action: All */}
@@ -86,7 +87,7 @@ export const ScriptsViewer: React.FC<ScriptsViewerProps> = ({
                      onClick={() => onStartLoop(scriptLoopCount)}
                      className="flex-1 flex items-center justify-center h-full bg-white text-gray-600 text-xs font-bold hover:bg-gray-50 hover:text-primary-600 transition-colors whitespace-nowrap px-3"
                   >
-                     <RefreshCw className="w-3.5 h-3.5 mr-2" /> 循环生成
+                     <RefreshCw className="w-3.5 h-3.5 mr-2" /> 循环生成(批次)
                   </button>
                </div>
              </div>
@@ -135,8 +136,9 @@ export const ScriptsViewer: React.FC<ScriptsViewerProps> = ({
                             <button 
                               onClick={() => onRetry(activeScript.episode)}
                               className="flex items-center px-3 py-1 bg-yellow-50 text-yellow-700 rounded-md text-xs font-bold hover:bg-yellow-100 border border-yellow-200 shadow-sm transition-all"
+                              title="重试生成该集所属的整个批次"
                             >
-                              <RotateCcw className="w-3 h-3 mr-1" /> 重试生成
+                              <RotateCcw className="w-3 h-3 mr-1" /> 重试批次
                             </button>
                          )}
                          
@@ -203,7 +205,7 @@ export const ScriptsViewer: React.FC<ScriptsViewerProps> = ({
         </div>
       ) : (
         <div className="flex-1 flex items-center justify-center bg-gray-50 text-gray-400">
-            请点击左侧"生成下一集"开始创作
+            请点击左侧"生成下一批剧本"开始创作
         </div>
       )}
     </div>
