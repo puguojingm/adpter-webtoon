@@ -218,9 +218,9 @@ async function agentLoop(
 ): Promise<AgentLoopResult> {
   
   let currentOutput = "";
-  let feedback = "";
   let retries = 0;
   const logs: LogEntry[] = [];
+  const attemptHistory: { output: string; feedback: string }[] = [];
 
   while (retries < maxRetries) {
     const currentAttempt = retries + 1;
@@ -233,8 +233,17 @@ async function agentLoop(
     onStreamChunk?.(`\n\n══════════════════════════════════════\n[Attempt ${currentAttempt}/${maxRetries}] ${workerName} Working...\n══════════════════════════════════════\n\n`);
 
     let fullWorkerPrompt = workerTaskPrompt;
-    if (feedback) {
-      fullWorkerPrompt += `\n\n[Previous Output]\n${currentOutput}\n\n[Previous Feedback - Please Fix]\n${feedback}`;
+    
+    // Add History of failed attempts
+    if (attemptHistory.length > 0) {
+      fullWorkerPrompt += `\n\n========== HISTORY OF PREVIOUS ATTEMPTS (QUALITY CHECK FAILED) ==========\n`;
+      attemptHistory.forEach((attempt, index) => {
+        fullWorkerPrompt += `\n>>> [Attempt ${index + 1} Output] >>>\n${attempt.output}\n`;
+        fullWorkerPrompt += `\n<<< [Attempt ${index + 1} Feedback] <<<\n${attempt.feedback}\n`;
+        fullWorkerPrompt += `\n--------------------------------------------------\n`;
+      });
+      fullWorkerPrompt += `\n=========================================================================\n`;
+      fullWorkerPrompt += `\n[INSTRUCTION]: The above attempts failed the quality check. Please generate a NEW version that fixes the issues identified in the [Attempt ${attemptHistory.length} Feedback]. Avoid repeating previous mistakes.`;
     }
 
     logs.push({
@@ -318,7 +327,7 @@ async function agentLoop(
         return { content: currentOutput, status: 'PASS', report, logs };
       } else {
         onStreamChunk?.(`\n\n⚠️ CHECK FAILED. Preparing retry...\n`);
-        feedback = report;
+        attemptHistory.push({ output: currentOutput, feedback: report });
         retries++;
       }
     } catch (e: any) {
@@ -331,9 +340,10 @@ async function agentLoop(
   }
 
   const failMsg = "Max retries reached.";
+  const lastFeedback = attemptHistory.length > 0 ? attemptHistory[attemptHistory.length - 1].feedback : "No feedback generated";
   onStreamChunk?.(`\n\n❌ ${failMsg}\n`);
   logs.push({ timestamp: Date.now(), role: 'system', agentName: 'System', content: failMsg, attempt: maxRetries });
-  return { content: currentOutput, status: 'FAIL', report: "Max retries reached. Last feedback: " + feedback, logs };
+  return { content: currentOutput, status: 'FAIL', report: "Max retries reached. Last feedback: " + lastFeedback, logs };
 }
 
 /**

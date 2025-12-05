@@ -1,4 +1,5 @@
 
+
 import { OUTPUT_STYLE } from "./core/outputStyle";
 import { getAdaptMethod } from "./core/adaptMethods";
 import { SCRIPT_TEMPLATE, SCRIPT_EXAMPLE } from "./templates";
@@ -88,8 +89,7 @@ export const getScriptSysPrompt = (novelType: string, description: string) => `
   - [OUTPUT STYLE]: 输出风格要求，最重要
   - [OUTPUT TEMPLATE]：输出模版
   - [OUTPU EXAMPLE]：输出案例
-  - [Previous Output]（可选）: 上次质检未通过时的输出结果
-  - [Previous Feedback - Please Fix]（可选）：质检员的反馈
+  - [HISTORY OF PREVIOUS ATTEMPTS]（可选）: 之前所有尝试的输出和质检反馈历史，用于避免重复错误
 
 `;
 
@@ -349,4 +349,3 @@ export const getWebtoonAlignerPrompt = (novelType: string, description: string) 
     8) 跨集连贯性是确保批次间衔接的关键
 
 `;
-

@@ -1,4 +1,5 @@
 
+
 import { getBreakPlotMethod } from './core/breakMethod';
 import { NovelType } from '../types';
 import { PLOT_TEMPLATE, PLOT_EXAMPLE } from './templates';
@@ -70,8 +71,7 @@ export const getBreakdownySysPrompt = (
   - [OUTPUT TEMPLATE]：输出模版
   - [OUTPU EXAMPLE]：输出案例
   - [PREVIOUS BATCH PLOT POINTS]（可选）: 上一个批次生成的剧情dian，用于帮助剧情连续性和合理分配跨批次剧集号
-  - [Previous Output]（可选）: 上次质检未通过时的输出结果
-  - [Previous Feedback - Please Fix]（可选）：质检员的反馈
+  - [HISTORY OF PREVIOUS ATTEMPTS]（可选）: 之前所有尝试的输出和质检反馈历史，用于避免重复错误
 
 [输出]
 直接输出 Markdown 格式的剧情列表，不包含其他废话。
@@ -221,7 +221,7 @@ export const getBreakdownAlignerSysPrompt = (novelType: string, description: str
     **【维度6】剧情点描述规范性**
     检查对象：【剧情n】格式是否完整清晰
     检查要点：
-    - 格式是否符合：【剧情n】[场景]，[角色A]对[角色B][做了什么]，[情绪钩子类型]，第X集，第X章，状态：未用
+    - 格式是否符合：【剧情n】[场景]，[角色A]对[角色B][做了什么]，[情绪钩子类型]，第X集，状态：未用
     - 场景描述是否清晰（地点/环境）
     - 角色是否明确（谁对谁）
     - 事件是否具体（做了什么）
@@ -231,7 +231,7 @@ export const getBreakdownAlignerSysPrompt = (novelType: string, description: str
     - 剧情编号是否连续（从【剧情1】开始）
     
     评判标准（break-plot-method + OUT TEMPLATE）：
-    - 统一格式：【剧情n】[场景]，[角色A]对[角色B][做了什么]，[情绪钩子类型]，第X集，第X章，状态：未用
+    - 统一格式：【剧情n】[场景]，[角色A]对[角色B][做了什么]，[情绪钩子类型]，第X集，状态：未用
     
     基准文档：break-plot-method → 三、剧情拆解与分集标注 + OUT TEMPLATE
     **【维度7】原文还原准确性**
@@ -362,4 +362,3 @@ export const getBreakdownAlignerSysPrompt = (novelType: string, description: str
     10) 这是源头质量把关，宁严勿松
 
 `;
-
