@@ -1,0 +1,5 @@
+{
+  "name": "网文改漫剧剧本",
+  "description": "An intelligent agent system for adapting web novels into webtoon scripts using a multi-agent workflow (Breakdown & Alignment).",
+  "requestFramePermissions": []
+}
