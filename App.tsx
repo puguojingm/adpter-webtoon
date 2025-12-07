@@ -12,6 +12,7 @@ import { LogViewer } from './components/LogViewer';
 import { ModelManager } from './components/ModelManager';
 import { ProjectState, NovelType, ScriptFile, NovelChapter, PlotBatch, UserInfo, Notification, ExecutionLog, PlotPoint, SavedModel } from './types';
 import * as GeminiService from './services/geminiService';
+import * as DB from './services/db';
 import { ChevronRight, Loader2, Save, Terminal, ChevronDown, ChevronUp, Cpu, Key, Globe, Settings2 } from 'lucide-react';
 
 const MOCK_USER: UserInfo = {
@@ -59,8 +60,9 @@ const App: React.FC = () => {
   const [logFilter, setLogFilter] = useState<{ type: 'breakdown' | 'script', referenceId: string } | null>(null);
   
   // Global Model State
-  const [savedModels, setSavedModels] = useState<SavedModel[]>(DEFAULT_MODELS);
+  const [savedModels, setSavedModels] = useState<SavedModel[]>([]);
   const [showModelManager, setShowModelManager] = useState(false);
+  const [isDbLoaded, setIsDbLoaded] = useState(false);
 
   const stopLoopRef = useRef(false);
 
@@ -71,6 +73,32 @@ const App: React.FC = () => {
   const consoleEndRef = useRef<HTMLDivElement>(null);
 
   const project = projects.find(p => p.id === activeProjectId);
+
+  // --- IndexedDB Initialization ---
+  useEffect(() => {
+    const initData = async () => {
+      try {
+        // Load Projects
+        const dbProjects = await DB.loadProjects();
+        setProjects(dbProjects);
+
+        // Load Models
+        const dbModels = await DB.loadModels();
+        if (dbModels.length > 0) {
+            setSavedModels(dbModels);
+        } else {
+            // Initialize Default Models if DB is empty
+            await DB.saveAllModels(DEFAULT_MODELS);
+            setSavedModels(DEFAULT_MODELS);
+        }
+        setIsDbLoaded(true);
+      } catch (error) {
+        console.error("Failed to load data from IndexedDB:", error);
+        addNotification('error', "数据加载失败，请检查浏览器存储权限");
+      }
+    };
+    initData();
+  }, []);
 
   // Auto-scroll console
   useEffect(() => {
@@ -99,7 +127,9 @@ const App: React.FC = () => {
     setActiveProjectId(null);
   };
 
-  const handleCreateProject = () => {
+  // --- Project Management with DB Sync ---
+
+  const handleCreateProject = async () => {
       const defaultModelId = savedModels[0]?.id || '';
       const newProject: ProjectState = {
           id: `proj-${Date.now()}`,
@@ -120,18 +150,66 @@ const App: React.FC = () => {
           breakdownModelId: defaultModelId,
           scriptModelId: defaultModelId
       };
-      setProjects([...projects, newProject]);
+      
+      setProjects(prev => [...prev, newProject]);
       setActiveProjectId(newProject.id);
-      addNotification('success', '新项目已创建');
+      
+      try {
+        await DB.saveProject(newProject);
+        addNotification('success', '新项目已创建');
+      } catch (e) {
+        console.error(e);
+        addNotification('error', '项目保存失败');
+      }
   };
 
-  const handleUpdateProject = (updates: Partial<ProjectState>) => {
+  const handleUpdateProject = async (updates: Partial<ProjectState>) => {
     if (!activeProjectId) return;
-    setProjects(prev => prev.map(p => (p.id === activeProjectId ? { ...p, ...updates } : p)));
+    
+    let updatedProject: ProjectState | undefined;
+
+    setProjects(prev => prev.map(p => {
+        if (p.id === activeProjectId) {
+            updatedProject = { ...p, ...updates };
+            return updatedProject;
+        }
+        return p;
+    }));
+
+    if (updatedProject) {
+        try {
+            await DB.saveProject(updatedProject);
+        } catch (e) {
+            console.error("Failed to update project in DB", e);
+        }
+    }
   };
 
   const handleSaveSettings = () => {
+     // handleUpdateProject already saves to DB
      addNotification('success', '项目设置已保存');
+  };
+
+  // Model Manager Update Handler
+  const handleUpdateModels = async (newModels: SavedModel[]) => {
+      // Find deleted models
+      const deleted = savedModels.filter(old => !newModels.find(n => n.id === old.id));
+      const addedOrUpdated = newModels;
+
+      setSavedModels(newModels);
+
+      try {
+          // Sync with DB
+          for (const m of deleted) {
+              await DB.deleteModel(m.id);
+          }
+          for (const m of addedOrUpdated) {
+              await DB.saveModel(m);
+          }
+      } catch (e) {
+          console.error("Failed to sync models to DB", e);
+          addNotification('error', '模型配置保存失败');
+      }
   };
 
   const handleFileUpload = (files: { content: string, fileName: string }[]) => {
@@ -195,6 +273,7 @@ const App: React.FC = () => {
       }
 
       setStreamingBreakdown(""); // Reset stream buffer
+      // Update UI Status only (lightweight)
       handleUpdateProject({ 
         isProcessing: true, 
         processingAction: 'breakdown',
@@ -231,11 +310,13 @@ const App: React.FC = () => {
             report: result.report
           };
 
+          // --- DB Sync: Full Project Update ---
+          let updatedProject: ProjectState | undefined;
           setProjects(prev => prev.map(p => {
              if (p.id === currentProject.id) {
                  const updatedBatches = [...p.plotBatches];
                  updatedBatches[batchIndex] = newBatch;
-                 return {
+                 updatedProject = {
                      ...p,
                      plotBatches: updatedBatches,
                      logs: [...p.logs, {
@@ -250,17 +331,19 @@ const App: React.FC = () => {
                         isApiError: result.isApiError
                      }]
                  };
+                 return updatedProject;
              }
              return p;
           }));
 
-          // Keep stream for review, don't clear immediately unless needed
-          // setStreamingBreakdown(""); 
+          if (updatedProject) {
+              await DB.saveProject(updatedProject);
+          }
+
           if (result.status === 'FAIL') return { status: 'FAIL', report: result.report };
           return { status: 'SUCCESS', report: result.report };
 
       } catch (error: any) {
-          // setStreamingBreakdown("");
           if (error.message === 'USER_ABORT') return { status: 'ABORTED' };
           return { status: 'FAIL', report: error.message };
       }
@@ -271,6 +354,7 @@ const App: React.FC = () => {
     stopLoopRef.current = false;
     let remaining = loopCount;
     while (remaining > 0 && !stopLoopRef.current) {
+        // Always get the latest state from the projects array (in case of async updates)
         const currentProject = projects.find(p => p.id === activeProjectId)!;
         const result = await processBreakdownBatch(currentProject);
         if (result.status !== 'SUCCESS') {
@@ -349,6 +433,8 @@ const App: React.FC = () => {
 
           const generatedScripts = GeminiService.parseScripts(result.content);
           
+          // --- DB Sync: Full Project Update ---
+          let updatedProject: ProjectState | undefined;
           setProjects(prev => prev.map(p => {
               if (p.id === currentProject.id) {
                   const updatedBatches = [...p.plotBatches];
@@ -373,7 +459,7 @@ const App: React.FC = () => {
                   });
                   updatedScripts.sort((a,b) => a.episode - b.episode);
 
-                  return {
+                  updatedProject = {
                       ...p,
                       plotBatches: updatedBatches,
                       scripts: updatedScripts,
@@ -389,16 +475,19 @@ const App: React.FC = () => {
                           isApiError: result.isApiError
                       }]
                   };
+                  return updatedProject;
               }
               return p;
           }));
 
-          // setStreamingScript(""); // Clear stream
+          if (updatedProject) {
+              await DB.saveProject(updatedProject);
+          }
+
           if (result.status === 'FAIL') return { status: 'FAIL', report: result.report };
           return { status: 'SUCCESS', report: result.report };
 
       } catch (error: any) {
-          // setStreamingScript("");
           if (error.message === 'USER_ABORT') return { status: 'ABORTED' };
           return { status: 'FAIL', report: error.message };
       }
@@ -470,8 +559,18 @@ const App: React.FC = () => {
 
   // --- Render Components ---
 
+  // Wait for DB load
+  if (!isDbLoaded) return (
+      <div className="flex items-center justify-center min-h-screen bg-gray-50">
+          <div className="flex flex-col items-center">
+             <Loader2 className="w-8 h-8 text-primary-600 animate-spin mb-4" />
+             <p className="text-gray-500 font-medium">Loading projects from database...</p>
+          </div>
+      </div>
+  );
+
   if (!isAuthenticated) return <><Auth onLogin={handleLogin} defaultUser={MOCK_USER} /><ToastContainer notifications={notifications} onClose={removeNotification} /></>;
-  if (!activeProjectId || !project) return <div className="flex flex-col min-h-screen"><TopBar user={currentUser} onLogout={handleLogout} onOpenModelManager={() => setShowModelManager(true)} /><ProjectList projects={projects} onSelectProject={(p) => setActiveProjectId(p.id)} onCreateProject={handleCreateProject} /><ToastContainer notifications={notifications} onClose={removeNotification} />{showModelManager && <ModelManager models={savedModels} onUpdateModels={setSavedModels} onClose={() => setShowModelManager(false)} />}</div>;
+  if (!activeProjectId || !project) return <div className="flex flex-col min-h-screen"><TopBar user={currentUser} onLogout={handleLogout} onOpenModelManager={() => setShowModelManager(true)} /><ProjectList projects={projects} onSelectProject={(p) => setActiveProjectId(p.id)} onCreateProject={handleCreateProject} /><ToastContainer notifications={notifications} onClose={removeNotification} />{showModelManager && <ModelManager models={savedModels} onUpdateModels={handleUpdateModels} onClose={() => setShowModelManager(false)} />}</div>;
 
   const renderSettings = () => (
     <div className="max-w-4xl mx-auto p-8 pb-32">
@@ -724,7 +823,7 @@ const App: React.FC = () => {
         {showModelManager && (
             <ModelManager 
                 models={savedModels} 
-                onUpdateModels={setSavedModels} 
+                onUpdateModels={handleUpdateModels} 
                 onClose={() => setShowModelManager(false)} 
             />
         )}
