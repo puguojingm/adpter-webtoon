@@ -166,28 +166,30 @@ const App: React.FC = () => {
   const handleUpdateProject = async (updates: Partial<ProjectState>) => {
     if (!activeProjectId) return;
     
-    let updatedProject: ProjectState | undefined;
-
+    // We construct the new state first to ensure we save exactly what we set in UI
     setProjects(prev => prev.map(p => {
         if (p.id === activeProjectId) {
-            updatedProject = { ...p, ...updates };
+            const updatedProject = { ...p, ...updates };
+            // Fire and forget save to DB to ensure UI doesn't lag
+            DB.saveProject(updatedProject).catch(e => {
+                console.error("Failed to sync project update to DB", e);
+                addNotification('error', '数据保存失败，请检查存储空间');
+            });
             return updatedProject;
         }
         return p;
     }));
-
-    if (updatedProject) {
-        try {
-            await DB.saveProject(updatedProject);
-        } catch (e) {
-            console.error("Failed to update project in DB", e);
-        }
-    }
   };
 
   const handleSaveSettings = () => {
-     // handleUpdateProject already saves to DB
-     addNotification('success', '项目设置已保存');
+     if (project) {
+         // Explicit save trigger
+         DB.saveProject(project).then(() => {
+             addNotification('success', '项目设置已保存到数据库');
+         }).catch(() => {
+             addNotification('error', '保存失败');
+         });
+     }
   };
 
   // Model Manager Update Handler
@@ -273,12 +275,14 @@ const App: React.FC = () => {
       }
 
       setStreamingBreakdown(""); // Reset stream buffer
-      // Update UI Status only (lightweight)
-      handleUpdateProject({ 
-        isProcessing: true, 
-        processingAction: 'breakdown',
-        processingStatus: `正在拆解第 ${nextChapters[0].order}-${nextChapters[nextChapters.length-1].order} 章...` 
-      });
+      // Update UI Status only (lightweight, no db save needed yet)
+      setProjects(prev => prev.map(p => p.id === currentProject.id ? { 
+          ...p, 
+          isProcessing: true, 
+          processingAction: 'breakdown',
+          processingStatus: `正在拆解第 ${nextChapters[0].order}-${nextChapters[nextChapters.length-1].order} 章...`
+      } : p));
+      
       setIsConsoleExpanded(true); // Open console on start
 
       try {
@@ -292,7 +296,10 @@ const App: React.FC = () => {
             lastEpisode,
             lastPlotNumber,
             MAX_RETRIES,
-            (status) => handleUpdateProject({ processingStatus: status }),
+            (status) => {
+                 // Lightweight status update, no DB save
+                 setProjects(prev => prev.map(p => p.id === currentProject.id ? { ...p, processingStatus: status } : p));
+            },
             (chunk) => setStreamingBreakdown(prev => prev + chunk), // Handle streaming
             currentProject.description,
             BATCH_SIZE,
@@ -311,34 +318,39 @@ const App: React.FC = () => {
           };
 
           // --- DB Sync: Full Project Update ---
-          let updatedProject: ProjectState | undefined;
-          setProjects(prev => prev.map(p => {
-             if (p.id === currentProject.id) {
-                 const updatedBatches = [...p.plotBatches];
-                 updatedBatches[batchIndex] = newBatch;
-                 updatedProject = {
-                     ...p,
-                     plotBatches: updatedBatches,
-                     logs: [...p.logs, {
-                        id: `log-${Date.now()}`,
-                        type: 'breakdown',
-                        referenceId: batchIndex.toString(),
-                        status: result.status,
-                        timestamp: Date.now(),
-                        result: result.content,
-                        report: result.report,
-                        entries: result.logs,
-                        isApiError: result.isApiError
-                     }]
-                 };
-                 return updatedProject;
-             }
-             return p;
-          }));
-
-          if (updatedProject) {
-              await DB.saveProject(updatedProject);
+          // 1. Mark chapters as processed
+          const updatedChapters = [...currentProject.chapters];
+          for(let i=startIdx; i<startIdx+BATCH_SIZE && i<updatedChapters.length; i++) {
+              updatedChapters[i] = { ...updatedChapters[i], isProcessed: true };
           }
+
+          // 2. Update Batches
+          const updatedBatches = [...currentProject.plotBatches];
+          updatedBatches[batchIndex] = newBatch;
+
+          // 3. Construct Complete Project Object
+          const updatedProject: ProjectState = {
+              ...currentProject,
+              chapters: updatedChapters,
+              plotBatches: updatedBatches,
+              logs: [...currentProject.logs, {
+                id: `log-${Date.now()}`,
+                type: 'breakdown',
+                referenceId: batchIndex.toString(),
+                status: result.status,
+                timestamp: Date.now(),
+                result: result.content,
+                report: result.report,
+                entries: result.logs,
+                isApiError: result.isApiError
+              }]
+          };
+          
+          // 4. Critical: Save to DB *before* updating UI to ensure persistence
+          await DB.saveProject(updatedProject);
+
+          // 5. Update React State
+          setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
 
           if (result.status === 'FAIL') return { status: 'FAIL', report: result.report };
           return { status: 'SUCCESS', report: result.report };
@@ -355,7 +367,23 @@ const App: React.FC = () => {
     let remaining = loopCount;
     while (remaining > 0 && !stopLoopRef.current) {
         // Always get the latest state from the projects array (in case of async updates)
-        const currentProject = projects.find(p => p.id === activeProjectId)!;
+        // Note: In strict mode or fast updates, relying on state like this in a loop is tricky,
+        // but since processBreakdownBatch awaits DB save and state update, 'projects' should satisfy next iteration if we re-fetch.
+        // However, standard React state in loop is stale. We need to fetch from the DB or use a ref-like pattern?
+        // Actually, since we just updated 'projects' state in processBreakdownBatch, we need to wait for render? 
+        // No, 'projects' const inside this function is stale.
+        // Best practice: Re-find project from the *latest* state if possible, but we can't easily do that inside a simple loop function without using a ref for 'projects'.
+        // Workaround: We will reload the project from DB or assume the loop index logic holds true based on existing array length.
+        
+        // Let's use a functional finder that grabs from the current 'projects' ref if we had one, but here we can just query the DB or use the updated index logic.
+        // Simplified: The logic calculates batchIndex based on currentProject.plotBatches.length.
+        // We must ensure 'currentProject' reflects the update from the previous iteration.
+        
+        // Since we can't get the fresh state easily in a loop without useEffect magic, 
+        // we will manually query IDB to get the absolute latest state for the next iteration.
+        const freshProjects = await DB.loadProjects();
+        const currentProject = freshProjects.find(p => p.id === activeProjectId)!;
+
         const result = await processBreakdownBatch(currentProject);
         if (result.status !== 'SUCCESS') {
             if (result.status === 'DONE') addNotification('success', "所有章节已拆解完毕！");
@@ -386,11 +414,14 @@ const App: React.FC = () => {
       if (!targetBatch || targetBatch.points.length === 0) return { status: 'NO_DATA' };
 
       setStreamingScript(""); // Reset Stream
-      handleUpdateProject({ 
+      
+      // UI Update only
+      setProjects(prev => prev.map(p => p.id === currentProject.id ? { 
+          ...p, 
           isProcessing: true, 
           processingAction: 'script',
           processingStatus: `正在生成第 ${batchIndex + 1} 批次的所有剧本...` 
-      });
+      } : p));
       setIsConsoleExpanded(true);
 
       // Context: Chapters
@@ -423,7 +454,9 @@ const App: React.FC = () => {
             previousScript,
             previousBatchPointsStr,
             MAX_RETRIES,
-            (status) => handleUpdateProject({ processingStatus: status }),
+            (status) => {
+                 setProjects(prev => prev.map(p => p.id === currentProject.id ? { ...p, processingStatus: status } : p));
+            },
             (chunk) => setStreamingScript(prev => prev + chunk), // Handle streaming
             currentProject.type,
             currentProject.description,
@@ -434,55 +467,51 @@ const App: React.FC = () => {
           const generatedScripts = GeminiService.parseScripts(result.content);
           
           // --- DB Sync: Full Project Update ---
-          let updatedProject: ProjectState | undefined;
-          setProjects(prev => prev.map(p => {
-              if (p.id === currentProject.id) {
-                  const updatedBatches = [...p.plotBatches];
-                  updatedBatches[batchIndex] = {
-                      ...updatedBatches[batchIndex],
-                      points: updatedBatches[batchIndex].points.map(pt => ({ ...pt, status: 'used' as const }))
-                  };
+          const updatedBatches = [...currentProject.plotBatches];
+          // Mark plot points as used
+          updatedBatches[batchIndex] = {
+              ...updatedBatches[batchIndex],
+              points: updatedBatches[batchIndex].points.map(pt => ({ ...pt, status: 'used' as const }))
+          };
 
-                  let updatedScripts = [...p.scripts];
-                  generatedScripts.forEach(gs => {
-                      const newScript: ScriptFile = {
-                          episode: gs.episode,
-                          title: `第 ${gs.episode} 集`,
-                          content: gs.content,
-                          status: result.status === 'PASS' ? 'approved' : 'rejected',
-                          alignerReport: result.report
-                      };
-                      
-                      const idx = updatedScripts.findIndex(s => s.episode === gs.episode);
-                      if (idx >= 0) updatedScripts[idx] = newScript;
-                      else updatedScripts.push(newScript);
-                  });
-                  updatedScripts.sort((a,b) => a.episode - b.episode);
+          let updatedScripts = [...currentProject.scripts];
+          generatedScripts.forEach(gs => {
+              const newScript: ScriptFile = {
+                  episode: gs.episode,
+                  title: `第 ${gs.episode} 集`,
+                  content: gs.content,
+                  status: result.status === 'PASS' ? 'approved' : 'rejected',
+                  alignerReport: result.report
+              };
+              
+              const idx = updatedScripts.findIndex(s => s.episode === gs.episode);
+              if (idx >= 0) updatedScripts[idx] = newScript;
+              else updatedScripts.push(newScript);
+          });
+          updatedScripts.sort((a,b) => a.episode - b.episode);
 
-                  updatedProject = {
-                      ...p,
-                      plotBatches: updatedBatches,
-                      scripts: updatedScripts,
-                      logs: [...p.logs, {
-                          id: `log-${Date.now()}`,
-                          type: 'script',
-                          referenceId: `batch-${batchIndex}`,
-                          status: result.status,
-                          timestamp: Date.now(),
-                          result: result.content,
-                          report: result.report,
-                          entries: result.logs,
-                          isApiError: result.isApiError
-                      }]
-                  };
-                  return updatedProject;
-              }
-              return p;
-          }));
+          const updatedProject: ProjectState = {
+              ...currentProject,
+              plotBatches: updatedBatches,
+              scripts: updatedScripts,
+              logs: [...currentProject.logs, {
+                  id: `log-${Date.now()}`,
+                  type: 'script',
+                  referenceId: `batch-${batchIndex}`,
+                  status: result.status,
+                  timestamp: Date.now(),
+                  result: result.content,
+                  report: result.report,
+                  entries: result.logs,
+                  isApiError: result.isApiError
+              }]
+          };
 
-          if (updatedProject) {
-              await DB.saveProject(updatedProject);
-          }
+          // 4. Critical: Save to DB *before* updating UI
+          await DB.saveProject(updatedProject);
+
+          // 5. Update React State
+          setProjects(prev => prev.map(p => p.id === currentProject.id ? updatedProject : p));
 
           if (result.status === 'FAIL') return { status: 'FAIL', report: result.report };
           return { status: 'SUCCESS', report: result.report };
@@ -499,7 +528,10 @@ const App: React.FC = () => {
       let remaining = loopCount;
       
       while (remaining > 0 && !stopLoopRef.current) {
-          const currentProject = projects.find(p => p.id === activeProjectId)!;
+          // Fetch fresh state from DB to ensure loop continuity
+          const freshProjects = await DB.loadProjects();
+          const currentProject = freshProjects.find(p => p.id === activeProjectId)!;
+
           const nextBatchIndex = currentProject.plotBatches.findIndex(b => b.points.some(p => p.status === 'unused'));
           
           if (nextBatchIndex === -1) {
@@ -523,6 +555,7 @@ const App: React.FC = () => {
       if (batchIdx !== -1) {
           addNotification('info', `正在重试第 ${batchIdx + 1} 批次剧本...`);
           stopLoopRef.current = false;
+          // Use current state project
           await processScriptBatch(project, batchIdx);
           handleUpdateProject({ isProcessing: false, processingAction: null, processingStatus: '' });
       } else {
@@ -598,23 +631,31 @@ const App: React.FC = () => {
             </div>
             <div className="grid grid-cols-2 gap-6">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">批次集数</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">批次集数 (默认6)</label>
                 <input 
                     type="number" 
                     min="1" 
-                    value={project.batchSize || 6} 
-                    onChange={(e) => handleUpdateProject({ batchSize: parseInt(e.target.value) || 6 })} 
+                    value={project.batchSize ?? ''} 
+                    onChange={(e) => {
+                         const val = e.target.value;
+                         handleUpdateProject({ batchSize: val === '' ? undefined : parseInt(val) });
+                    }} 
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-white text-gray-900 focus:ring-2 focus:ring-primary-500 focus:border-transparent outline-none transition-all"
+                    placeholder="6"
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">最大重试次数</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">最大重试次数 (默认3)</label>
                 <input 
                     type="number" 
                     min="0" 
-                    value={project.maxRetries || 3} 
-                    onChange={(e) => handleUpdateProject({ maxRetries: parseInt(e.target.value) || 3 })} 
+                    value={project.maxRetries ?? ''} 
+                    onChange={(e) => {
+                         const val = e.target.value;
+                         handleUpdateProject({ maxRetries: val === '' ? undefined : parseInt(val) });
+                    }} 
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg bg-white text-gray-900 focus:ring-2 focus:ring-primary-500 focus:border-transparent outline-none transition-all"
+                    placeholder="3"
                 />
               </div>
             </div>

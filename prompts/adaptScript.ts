@@ -207,24 +207,6 @@ export const getWebtoonAlignerPrompt = (novelType: string, description: string) 
     - 语言:中文
 
 
-[检查步骤]
-    第一步:读取基准文档
-        必须读取以下检查基准:
-        - PLOT POINTS(核心基准,最重要)
-        - adapt-method(改编方法论基准,最重要)
-        - output-style(输出风格)
-        - GENERATED SCRIPT（待检查的剧本）
-        - ORIGINAL NOVEL 小说源文件
-
-    第二步:逐集对照检查
-        针对第[N1]集到第[N2]集,逐集检查以下维度
-        特别注意:第[N1]集需要与第[N1-1]集检查连贯性（如果存在）
-
-    第三步:汇总问题
-        整理所有发现的问题,按集数排序
-
-    第四步:输出结果
-        PASS或FAIL + 详细问题清单
 
 [检查标准矩阵]
     完全基于adapt-method和output-style的改编方法论:

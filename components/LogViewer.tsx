@@ -113,12 +113,12 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, title, onClose }) =>
              const attemptLabel = `执行 #${logs.length - index}`;
 
              // Group entries by attempt
-             const attempts = log.entries.reduce<Record<number, LogEntry[]>>((acc, entry) => {
+             const attempts = log.entries.reduce((acc, entry) => {
                  const attemptNum = entry.attempt || 1;
                  if (!acc[attemptNum]) acc[attemptNum] = [];
                  acc[attemptNum].push(entry);
                  return acc;
-             }, {});
+             }, {} as Record<number, LogEntry[]>);
              const attemptKeys = Object.keys(attempts).map(Number).sort((a,b) => a - b);
 
              return (
